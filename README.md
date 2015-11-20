@@ -1,2 +1,2 @@
 # cmplayer
-Synchronizing sound to the system-clock with jack-output
+Synchronizing music playback to jack via the system-clock.
