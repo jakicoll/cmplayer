@@ -29,6 +29,8 @@ namespace po = boost::program_options;
 
 #define SKIP_THRESHOLD (1.0 / 8) /* before dropping audio */
 
+#define CHANNELS 2
+
 using namespace std;
 
 typedef int16_t sample;
@@ -39,13 +41,21 @@ jack_port_t *output_port_2;
 jack_client_t *client;
 std::deque<sample> dq;
 
-std::deque<sample>::iterator it;
+//Programm Options (boost)
+string songpath;
+string jack_portname="";
+long starttime;
+string importscript="";
+bool autoconnect;
+
+//Runtime variables
 long player_sample_position=0;
 double pitch=1.0;
 struct timeval tval_start;
 int log_count=0;
 double target_seconds;
-
+double song_duration=-1;
+jack_nframes_t samplerate;
 
 double skip_treshold=0.05;
 
@@ -113,12 +123,12 @@ void retarget(bool log) {
     //Calculate the position where the player should be right now
     target_seconds=tval_now.tv_sec - tval_start.tv_sec + 0.000001*(tval_now.tv_usec - tval_start.tv_usec);
 
-    if(target < 0) {
+    if(target_seconds < 0) {
         //Track has not started yet; nothing to do here.r
         return;
     }
 
-    if(target > 10) {
+    if(target_seconds > 10) {
         log=true;
         tval_start.tv_sec=tval_start.tv_sec+15;
         cout << "retargeting for confusion" << endl;
@@ -127,13 +137,13 @@ void retarget(bool log) {
 
 
     //Calculate time difference (independend of sample rate)
-    double position_seconds=1.0*player_sample_position/2/44100;
+    double position_seconds=1.0*player_sample_position/CHANNELS/samplerate;
     double difference_seconds=position_seconds-target_seconds; //positive diff: player is ahead of time.
 
     pitch=1.0;
 
-    if(fabs(difference) > skip_treshold) {
-        player_sample_position=target*44100*2; //2 channels
+    if(fabs(difference_seconds) > skip_treshold) {
+        player_sample_position=target_seconds*samplerate*CHANNELS;
 
         //pitch=1.0
     } else { //Sync us back on track.
@@ -141,8 +151,8 @@ void retarget(bool log) {
         //Try: Jumping might be enough; let's see, how often it has to jump.
         return;
 
-        if(fabs(difference) > 0.02) {
-            if(difference<0) {
+        if(fabs(difference_seconds) > 0.02) {
+            if(difference_seconds<0) {
                 pitch=1.05;
                 cout << "fast" << endl;
             } else {
@@ -155,7 +165,7 @@ void retarget(bool log) {
     }
 
     if(log)
-    cout << "Position: " << position << " | Target: " << target << " | DELTA " << difference <<
+    cout << "Position: " << position_seconds << " | Target: " << target_seconds << " | DELTA " << difference_seconds <<
     " | Pitch: " << pitch << endl;
 
 }
@@ -213,18 +223,15 @@ jack_shutdown (void *arg)
 int main(const int argc, const char* argv[])
 {
      try {
-        string songpath="asb";
-        string jack_portname;
-        long starttime=123;
-        bool autoconnect=false;
         po::options_description desc("Allowed options");
         desc.add_options()
-                ("help", "produce help message and exit")
-                ("starttime", po::value(&starttime)->required(), "unix timestamp for track synchronisation")
-                ("song", po::value(&songpath)->required(), "path to the song to play")
-                ("jackport", po::value(&jack_portname), "jack port name")
-                ("speakers", po::value<string>(), "cmplayer connects its own output to the given jack input")
-                ("autoconnect", po::bool_switch(&autoconnect), "cmplayer will automatically connect to speakers");
+                ("help,h", "produce help message and exit")
+                ("starttime,t", po::value(&starttime)->default_value(-1), "unix timestamp for track synchronisation; playback start immediately if ommited.")
+                ("song,s", po::value(&songpath)->required(), "path to the song to play")
+                ("jackport,j", po::value(&jack_portname), "jack port name")
+                //("speakers,o", po::value<string>(), "cmplayer connects its own output to the given jack input")
+                ("autoconnect,a", po::bool_switch(&autoconnect)->default_value(true), "cmplayer will automatically connect to speakers")
+                ("importer,i", po::value(&importscript)->default_value("import"), "helperscript to read audio from; relative to working dir (start with ./) or full path. defaults to ./import");
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -245,31 +252,12 @@ int main(const int argc, const char* argv[])
         cerr << "Exception of unknown type!\n";
     }
 
-
-    cout << "Hello world!" << endl;
-
-    gettimeofday(&tval_start, NULL);
-    tval_start.tv_sec+=2;
-
-    //const pstreams::pmode mode = pstreams::pstdout|pstreams::pstderr;
-
-    std::vector<std::string> importerargs;
-
-    importerargs.push_back("./import");
-    importerargs.push_back("risk.44100.rawpcm");
-    importerargs.push_back("44100");
-
-
-    redi::ipstream importer("./import", importerargs); //TODO Error handling!
-
-
-    dq = read_file_into_memory(importer);
-
-
-    cout << "Size of deque = " << dq.size() << endl;
-
-    it=dq.begin();
-
+    if(starttime == -1) {
+        gettimeofday(&tval_start, NULL);
+    } else {
+        tval_start.tv_sec=starttime;
+        tval_start.tv_usec=0;
+    }
 
     const char **ports;
     const char *client_name = "cmwax";
@@ -300,6 +288,9 @@ int main(const int argc, const char* argv[])
         fprintf (stderr, "unique name `%s' assigned\n", client_name);
     }
 
+    samplerate=jack_get_sample_rate(client);
+    cout << "engine sample rate: "<< samplerate << endl;
+
     /* tell the JACK server to call `process()' whenever
        there is work to be done.
     */
@@ -313,10 +304,23 @@ int main(const int argc, const char* argv[])
 
     jack_on_shutdown (client, jack_shutdown, 0);
 
-    /* display the current sample rate.
-     */
+    //const pstreams::pmode mode = pstreams::pstdout|pstreams::pstderr;
 
-    cout << "engine sample rate: "<< jack_get_sample_rate (client) << endl;
+    std::vector<std::string> importerargs;
+
+    importerargs.push_back(importscript);
+    importerargs.push_back(songpath);
+    importerargs.push_back(std::to_string(samplerate));
+
+
+    redi::ipstream importer(importscript, importerargs); //TODO Error handling!
+
+
+    dq = read_file_into_memory(importer);
+
+    song_duration=dq.size()/samplerate/2; //c
+
+    cout << "Read " << dq.size() << "samples; song duration " << song_duration << " seconds."<< endl;
 
     /* create two ports */
 
@@ -342,31 +346,33 @@ int main(const int argc, const char* argv[])
         exit (1);
     }
 
-    /* Connect the ports.  You can't do this before the client is
-     * activated, because we can't make connections to clients
-     * that aren't running.  Note the confusing (but necessary)
-     * orientation of the driver backend ports: playback ports are
-     * "input" to the backend, and capture ports are "output" from
-     * it.
-     */
-    ports = jack_get_ports (client, NULL, NULL,
-                            JackPortIsPhysical|JackPortIsInput);
-    if (ports == NULL)
-    {
-        fprintf(stderr, "no physical playback ports\n");
-        exit (1);
-    }
 
-    if (jack_connect (client, jack_port_name (output_port_1), ports[0]))
-    {
-        fprintf (stderr, "cannot connect output port 1\n");
-    }
-    if (jack_connect (client, jack_port_name (output_port_2), ports[1]))
-    {
-        fprintf (stderr, "cannot connect output port 2\n");
-    }
+    if(autoconnect) {
+        /* Connect the ports.  You can't do this before the client is
+         * activated, because we can't make connections to clients
+         * that aren't running.  Note the confusing (but necessary)
+         * orientation of the driver backend ports: playback ports are
+         * "input" to the backend, and capture ports are "output" from
+         * it.
+         */
+        ports = jack_get_ports (client, NULL, NULL,
+                                JackPortIsPhysical|JackPortIsInput);
+        if (ports == NULL)
+        {
+            fprintf(stderr, "no physical playback ports\n");
+            exit (1);
+        }
+        if (jack_connect (client, jack_port_name (output_port_1), ports[0]))
+        {
+            fprintf (stderr, "cannot connect output port 1\n");
+        }
+        if (jack_connect (client, jack_port_name (output_port_2), ports[1]))
+        {
+            fprintf (stderr, "cannot connect output port 2\n");
+        }
 
-    free (ports);
+        free (ports);
+    }
 
     /* keep running until stopped by the user */
 
