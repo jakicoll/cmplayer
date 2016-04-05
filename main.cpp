@@ -43,27 +43,28 @@ std::deque<sample> dq;
 
 //Programm Options (boost)
 string songpath;
-string jack_portname="";
-string importscript="";
+string jack_portname;
+string importscript;
 bool autoconnect;
 
 //Runtime variables
 long player_sample_position=0;
-double pitch=1.0;
 struct timeval tval_start;
 int log_count=0;
 double target_seconds;
 double song_duration=-1;
 jack_nframes_t samplerate;
+double pitch=1;
 
-double skip_treshold;
+double skip_threshold;
+double sync_threshold;
 
 /* Credits go out to Explicit C++
 <http://cpp.indi.frih.net/blog/2014/09/how-to-read-an-entire-file-into-memory-in-cpp/> */
 //Now there is one really strange thing: Reading a stream of shorts (16 bit), which is out target
 //format (as we have 16 bit samples): It does not work. Only a few characters are read and then it's EOF.
 //Now matter how hard I tried. It took me more than a day until I decided to read 8 bit, convert on my own and save.
-std::deque<sample> read_file_into_memory(std::basic_istream<char>& in)
+std::deque<sample> read_samples_into_memory(std::basic_istream<char>& in)
 {
     using std::begin;
     using std::end;
@@ -75,6 +76,9 @@ std::deque<sample> read_file_into_memory(std::basic_istream<char>& in)
     std::deque<sample> container = std::deque<sample>();
 
     auto chunk = std::array<char, chunk_size>{};
+
+    int chunkcount=0;
+
     auto converted = std::array<sample, chunk_size*sizeof(char)/sizeof(sample)>{};
 
     while (in.read(chunk.data(), chunk.size()) ||
@@ -101,10 +105,8 @@ std::deque<sample> read_file_into_memory(std::basic_istream<char>& in)
         container.insert(end(container),
                          begin(converted),
                          begin(converted) + sample_read_count);
-        cout << "read: " << sample_read_count << " samples."<< endl;
+        cout << "read " << sample_read_count << " samples. chunk " << ++chunkcount << "." << endl;
     }
-    //At the end of the container, append in.gcount() elements from chunk.
-    cout << "gcount: " << in.gcount() << " and fail: " << in.fail() << "and eof: " << in.eof() << endl;
     return container;
 }
 
@@ -123,48 +125,29 @@ void retarget(bool log) {
     target_seconds=tval_now.tv_sec - tval_start.tv_sec + 0.000001*(tval_now.tv_usec - tval_start.tv_usec);
 
     if(target_seconds < 0) {
-        //Track has not started yet; nothing to do here.r
+        //Track has not started yet; nothing to do here.
         return;
     }
-
-    if(target_seconds > 10) {
-        log=true;
-        tval_start.tv_sec=tval_start.tv_sec+15;
-        cout << "retargeting for confusion" << endl;
-        target_seconds=tval_now.tv_sec - tval_start.tv_sec + 0.000001*(tval_now.tv_usec - tval_start.tv_usec);
-    }
-
 
     //Calculate time difference (independend of sample rate)
     double position_seconds=1.0*player_sample_position/CHANNELS/samplerate;
     double difference_seconds=position_seconds-target_seconds; //positive diff: player is ahead of time.
 
-    pitch=1.0;
-
     if(log)
     cout << "Position: " << position_seconds << " | Target: " << target_seconds << " | DELTA " << difference_seconds <<
     " | Pitch: " << pitch << endl;
 
-    if(fabs(difference_seconds) > skip_treshold) {
+    if(fabs(difference_seconds) > skip_threshold) {
+        pitch=1.0;
         player_sample_position=target_seconds*samplerate*CHANNELS;
-
-        //pitch=1.0
     } else { //Sync us back on track.
-
-        //Try: Jumping might be enough; let's see, how often it has to jump.
-        return;
-
-        if(fabs(difference_seconds) > 0.02) {
+        //if(fabs(difference_seconds) > sync_threshold) {
             if(difference_seconds<0) {
-                pitch=1.05;
-                cout << "fast" << endl;
+                pitch=0.99;
             } else {
-                pitch=0.95;
-                cout << "slow" << endl;
+                pitch=1.01;
             }
-        } else {
-            pitch=1.0;
-        }
+        //}
     }
 
 }
@@ -228,10 +211,11 @@ int main(const int argc, const char* argv[])
                 ("starttime,t", po::value(&starttime)->default_value(-1), "unix timestamp for track synchronisation; playback starts immediately if ommited.")
                 ("song,s", po::value(&songpath)->required(), "path to the song to play")
                 ("jackport,j", po::value(&jack_portname), "jack port name")
-                //("speakers,o", po::value<string>(), "cmplayer connects its own output to the given jack input")
                 ("autoconnect,a", po::bool_switch(&autoconnect)->default_value(true), "cmplayer will automatically connect to speakers")
                 ("importer,i", po::value(&importscript)->default_value("./import"), "helperscript to read audio from; relative to working dir (start with ./) or full path.")
-                ("tolerance,tol", po::value(&skip_treshold)->default_value(0.05), "Tolerance until audio is skipped back in sync");
+                ("skipthreshold", po::value(&skip_threshold)->default_value(0.05), "Tolerance in seconds until audio is skipped to sync")
+                ("syncthreshold", po::value(&sync_threshold)->default_value(0.01), "Tolerance in seconds until audio is resampled to sync");
+
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -314,7 +298,7 @@ int main(const int argc, const char* argv[])
     redi::ipstream importer(importscript, importerargs); //TODO Error handling!
 
 
-    dq = read_file_into_memory(importer);
+    dq = read_samples_into_memory(importer);
 
     song_duration=dq.size()/samplerate/2; //c
 
