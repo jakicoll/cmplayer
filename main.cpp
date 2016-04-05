@@ -14,8 +14,6 @@ namespace po = boost::program_options;
 
 #include <unistd.h>
 
-#include "xwax.cpp"
-
 #define CHANNELS 2
 #define EXIT_SECONDS_AFTER_SONG 5
 
@@ -36,16 +34,19 @@ string importscript;
 bool autoconnect;
 
 //Runtime variables
+
+/*
+ * If it is not explicitely declared otherwise, sample always refers to the total sample for both channels;
+ * a STEREO track of 1 second with 44100 samplerate has 88200 samples.
+ */
 long player_sample_position=0;
 struct timeval tval_start;
 int log_count=0;
 double target_seconds;
 double song_duration_seconds=-1;
 jack_nframes_t samplerate;
-double pitch=1;
 
 double skip_threshold;
-double sync_threshold;
 
 /* Credits go out to Explicit C++
 <http://cpp.indi.frih.net/blog/2014/09/how-to-read-an-entire-file-into-memory-in-cpp/> */
@@ -58,8 +59,6 @@ std::deque<sample> read_samples_into_memory(std::basic_istream<char>& in)
     using std::end;
 
     auto const chunk_size = 512*512;
-    cout << "Chunksize (bytes): " << chunk_size << endl;
-    cout << "Chunksize (samples): " << chunk_size*sizeof(char)/sizeof(sample) << endl;
 
     std::deque<sample> container = std::deque<sample>();
 
@@ -93,15 +92,14 @@ std::deque<sample> read_samples_into_memory(std::basic_istream<char>& in)
         container.insert(end(container),
                          begin(converted),
                          begin(converted) + sample_read_count);
-        cout << "read " << sample_read_count << " samples. chunk " << ++chunkcount << "." << endl;
+        cout << "read " << sample_read_count << " samples. chunk " << ++chunkcount << "." << '\r';
     }
+    cout << endl;
     return container;
 }
 
 /**
  * Adjusts the pitch and jumps within the track if the offset exceeds a threshold.
- * In case the player is mo
- * @return True, if audio has to be copied. False, if we are "pre-playback".
  */
 void retarget(bool log) {
     //target: seconds in the track; multiply by samplerate to get sample we should be now.
@@ -112,18 +110,12 @@ void retarget(bool log) {
     //Calculate the position where the player should be right now
     target_seconds=tval_now.tv_sec - tval_start.tv_sec + 0.000001*(tval_now.tv_usec - tval_start.tv_usec);
 
-    if(target_seconds < 0) {
-        //Track has not started yet; nothing to do here.
-        return;
-    }
-
     //Calculate time difference (independend of sample rate)
     double position_seconds=1.0*player_sample_position/CHANNELS/samplerate;
     double difference_seconds=position_seconds-target_seconds; //positive diff: player is ahead of time.
 
     if(log)
-    cout << "Position: " << position_seconds << " | Target: " << target_seconds << " | DELTA " << difference_seconds <<
-    " | Pitch: " << pitch << endl;
+    cout << "Position: " << position_seconds << " | Target: " << target_seconds << " | DELTA " << difference_seconds << endl;
 
     if(fabs(difference_seconds) > skip_threshold) {
         player_sample_position=target_seconds*samplerate*CHANNELS;
@@ -133,12 +125,7 @@ void retarget(bool log) {
 
 
 /**
- * The process callback for this JACK application is called in a
- * special realtime thread once for each audio cycle.
- *
- * This client does nothing more than copy data from its input
- * port to its output port. It will exit when stopped by
- * the user (e.g. using Ctrl-C on a unix-ish operating system)
+ * TODO This needs documentation;
  */
 int
 process (jack_nframes_t nframes, void *arg)
@@ -154,23 +141,44 @@ process (jack_nframes_t nframes, void *arg)
     out1 = (jack_default_audio_sample_t*) jack_port_get_buffer (output_port_1, nframes);
     out2 = (jack_default_audio_sample_t*) jack_port_get_buffer (output_port_2, nframes);
 
-    if(player_sample_position > 0) {
-        build_pcm(&dq, player_sample_position, nframes, pitch, out1, out2);
-        player_sample_position+=2*nframes; //2 Channels
+    unsigned samples_needed=nframes*CHANNELS;
 
-    } else { //TODO Is this neccessarry at all?
+    unsigned samples_in_memory=dq.size();
+    unsigned last_sample_needed=player_sample_position+samples_needed;
+
+    bool whole_frame_is_pre_playback = last_sample_needed < 0; //first sample of the song
+    bool enough_sample_in_memory = samples_in_memory >= last_sample_needed;
+
+    if(whole_frame_is_pre_playback || !enough_sample_in_memory) {
+        //output silence
         memset(out1, '\0', sizeof(*out1)*nframes);
-        memset(out2, '\0', sizeof(*out1)*nframes);
-        player_sample_position+=nframes;
+        memset(out2, '\0', sizeof(*out2)*nframes);
+
+        if(target_seconds > song_duration_seconds + EXIT_SECONDS_AFTER_SONG) {
+            jack_client_close (client);
+            cout << "Ich habe fertig. (Was erlauben Strunz?)" << endl;
+            exit (0);
+        }
+        //Forward pointer manually
+        player_sample_position+=CHANNELS*nframes; //2 Channels
+    } else {
+        //Each RAWPCM Sample is stored as 16bit (short); We have a stereo rawpcm
+        //so it's L1 R1 L2 R2...; Jack however requires us to use floats
+        //Short is from -32768 to 32767, so we got to divide by 32768 (which is 2^15)
+        float magic=32768.0;
+        while(player_sample_position < last_sample_needed) {
+            if(player_sample_position < 0) {
+                *out1=0;
+                *out2=0;
+            } else {
+                *out1= dq.at(player_sample_position)*1.0/magic;
+                *out2= dq.at(player_sample_position+1)*1.0/magic;
+            }
+            ++out1;
+            ++out2;
+            player_sample_position+=2;
+        }
     }
-
-    if(target_seconds > song_duration_seconds + EXIT_SECONDS_AFTER_SONG) {
-        jack_client_close (client);
-        cout << "Ich habe fertig. (Was erlauben Strunz?)" << endl;
-        exit (0);
-    }
-
-
     return 0;
 }
 
@@ -198,8 +206,7 @@ int main(const int argc, const char* argv[])
                 ("jackport,j", po::value(&jack_portname), "jack port name")
                 ("autoconnect,a", po::bool_switch(&autoconnect)->default_value(true), "cmplayer will automatically connect to speakers")
                 ("importer,i", po::value(&importscript)->default_value("./import"), "helperscript to read audio from; relative to working dir (start with ./) or full path.")
-                ("skipthreshold", po::value(&skip_threshold)->default_value(0.05), "Tolerance in seconds until audio is skipped to sync")
-                ("syncthreshold", po::value(&sync_threshold)->default_value(0.01), "Tolerance in seconds until audio is resampled to sync");
+                ("skipthreshold", po::value(&skip_threshold)->default_value(0.05), "Tolerance in seconds until audio is skipped to sync");
 
 
         po::variables_map vm;
@@ -285,9 +292,9 @@ int main(const int argc, const char* argv[])
 
     dq = read_samples_into_memory(importer);
 
-    song_duration_seconds=dq.size()/samplerate/2; //c
+    song_duration_seconds=dq.size()/samplerate/CHANNELS; //c
 
-    cout << "Read " << dq.size() << "samples; song duration " << song_duration_seconds << " seconds."<< endl;
+    cout << "Read " << dq.size() << " samples; song duration " << song_duration_seconds << " seconds."<< endl;
 
     /* create two ports */
 
