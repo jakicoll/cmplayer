@@ -155,8 +155,10 @@ process (jack_nframes_t nframes, void *arg)
         memset(out2, '\0', sizeof(*out2)*nframes);
 
         if(target_seconds > song_duration_seconds + EXIT_SECONDS_AFTER_SONG) {
-            jack_client_close (client);
             cout << "Ich habe fertig. (Was erlauben Strunz?)" << endl;
+            //jack_client_close (client);
+            //TODO It does not work: The program does not close.
+            //Maybe we can not call jack_client_close from within process?
             exit (0);
         }
         //Forward pointer manually
