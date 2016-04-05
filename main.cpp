@@ -144,7 +144,7 @@ process (jack_nframes_t nframes, void *arg)
     unsigned samples_needed=nframes*CHANNELS;
 
     unsigned samples_in_memory=dq.size();
-    unsigned last_sample_needed=player_sample_position+samples_needed;
+    long last_sample_needed=player_sample_position+samples_needed;
 
     bool whole_frame_is_pre_playback = last_sample_needed < 0; //first sample of the song
     bool enough_sample_in_memory = samples_in_memory >= last_sample_needed;
