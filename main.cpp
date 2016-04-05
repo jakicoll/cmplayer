@@ -15,21 +15,9 @@ namespace po = boost::program_options;
 #include <unistd.h>
 
 #include "xwax.cpp"
-//Taken from xwax!
-/* Bend playback speed to compensate for the difference between our
- * current position and that given by the timecode */
-
-#define SYNC_TIME (1.0 / 2) /* time taken to reach sync */
-#define SYNC_PITCH 0.05 /* don't sync at low pitches */
-#define SYNC_RC 0.05 /* filter to 1.0 when no timecodes available */
-
-/* If the difference between our current position and that given by
- * the timecode is greater than this value, recover by jumping
- * straight to the position given by the timecode. */
-
-#define SKIP_THRESHOLD (1.0 / 8) /* before dropping audio */
 
 #define CHANNELS 2
+#define EXIT_SECONDS_AFTER_SONG 5
 
 using namespace std;
 
@@ -52,7 +40,7 @@ long player_sample_position=0;
 struct timeval tval_start;
 int log_count=0;
 double target_seconds;
-double song_duration=-1;
+double song_duration_seconds=-1;
 jack_nframes_t samplerate;
 double pitch=1;
 
@@ -138,19 +126,9 @@ void retarget(bool log) {
     " | Pitch: " << pitch << endl;
 
     if(fabs(difference_seconds) > skip_threshold) {
-        pitch=1.0;
         player_sample_position=target_seconds*samplerate*CHANNELS;
         cout << "Skipped " << difference_seconds << "seconds." << endl;
-    } else { //Sync us back on track.
-        //if(fabs(difference_seconds) > sync_threshold) {
-            if(difference_seconds<0) {
-                pitch=0.99;
-            } else {
-                pitch=1.01;
-            }
-        //}
     }
-
 }
 
 
@@ -184,6 +162,12 @@ process (jack_nframes_t nframes, void *arg)
         memset(out1, '\0', sizeof(*out1)*nframes);
         memset(out2, '\0', sizeof(*out1)*nframes);
         player_sample_position+=nframes;
+    }
+
+    if(target_seconds > song_duration_seconds + EXIT_SECONDS_AFTER_SONG) {
+        jack_client_close (client);
+        cout << "Ich habe fertig. (Was erlauben Strunz?)" << endl;
+        exit (0);
     }
 
 
@@ -301,9 +285,9 @@ int main(const int argc, const char* argv[])
 
     dq = read_samples_into_memory(importer);
 
-    song_duration=dq.size()/samplerate/2; //c
+    song_duration_seconds=dq.size()/samplerate/2; //c
 
-    cout << "Read " << dq.size() << "samples; song duration " << song_duration << " seconds."<< endl;
+    cout << "Read " << dq.size() << "samples; song duration " << song_duration_seconds << " seconds."<< endl;
 
     /* create two ports */
 
@@ -357,17 +341,8 @@ int main(const int argc, const char* argv[])
         free (ports);
     }
 
-    /* keep running until stopped by the user */
+    /* keep running; programm exits in retarget() (called by process()) as soon as the song is over. */
 
     sleep (-1);
-
-    /* this is never reached but if the program
-       had some other way to exit besides being killed,
-       they would be important to call.
-    */
-
-    jack_client_close (client);
-    exit (0);
-
     return 0;
 }
