@@ -44,7 +44,6 @@ std::deque<sample> dq;
 //Programm Options (boost)
 string songpath;
 string jack_portname="";
-long starttime;
 string importscript="";
 bool autoconnect;
 
@@ -57,7 +56,7 @@ double target_seconds;
 double song_duration=-1;
 jack_nframes_t samplerate;
 
-double skip_treshold=0.05;
+double skip_treshold;
 
 /* Credits go out to Explicit C++
 <http://cpp.indi.frih.net/blog/2014/09/how-to-read-an-entire-file-into-memory-in-cpp/> */
@@ -142,6 +141,10 @@ void retarget(bool log) {
 
     pitch=1.0;
 
+    if(log)
+    cout << "Position: " << position_seconds << " | Target: " << target_seconds << " | DELTA " << difference_seconds <<
+    " | Pitch: " << pitch << endl;
+
     if(fabs(difference_seconds) > skip_treshold) {
         player_sample_position=target_seconds*samplerate*CHANNELS;
 
@@ -163,10 +166,6 @@ void retarget(bool log) {
             pitch=1.0;
         }
     }
-
-    if(log)
-    cout << "Position: " << position_seconds << " | Target: " << target_seconds << " | DELTA " << difference_seconds <<
-    " | Pitch: " << pitch << endl;
 
 }
 
@@ -195,7 +194,6 @@ process (jack_nframes_t nframes, void *arg)
 
     if(player_sample_position > 0) {
         build_pcm(&dq, player_sample_position, nframes, pitch, out1, out2);
-
         player_sample_position+=2*nframes; //2 Channels
 
     } else { //TODO Is this neccessarry at all?
@@ -222,16 +220,18 @@ jack_shutdown (void *arg)
 
 int main(const int argc, const char* argv[])
 {
-     try {
+    long starttime;
+    try {
         po::options_description desc("Allowed options");
         desc.add_options()
                 ("help,h", "produce help message and exit")
-                ("starttime,t", po::value(&starttime)->default_value(-1), "unix timestamp for track synchronisation; playback start immediately if ommited.")
+                ("starttime,t", po::value(&starttime)->default_value(-1), "unix timestamp for track synchronisation; playback starts immediately if ommited.")
                 ("song,s", po::value(&songpath)->required(), "path to the song to play")
                 ("jackport,j", po::value(&jack_portname), "jack port name")
                 //("speakers,o", po::value<string>(), "cmplayer connects its own output to the given jack input")
                 ("autoconnect,a", po::bool_switch(&autoconnect)->default_value(true), "cmplayer will automatically connect to speakers")
-                ("importer,i", po::value(&importscript)->default_value("import"), "helperscript to read audio from; relative to working dir (start with ./) or full path. defaults to ./import");
+                ("importer,i", po::value(&importscript)->default_value("./import"), "helperscript to read audio from; relative to working dir (start with ./) or full path.")
+                ("tolerance,tol", po::value(&skip_treshold)->default_value(0.05), "Tolerance until audio is skipped back in sync");
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -242,8 +242,6 @@ int main(const int argc, const char* argv[])
         }
 
         po::notify(vm); //Ensures all required options are given.
-
-
     } catch(exception& e) {
         cerr << "error: " << e.what() << "\n";
         return 1;
