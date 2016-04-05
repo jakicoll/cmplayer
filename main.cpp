@@ -140,6 +140,7 @@ void retarget(bool log) {
     if(fabs(difference_seconds) > skip_threshold) {
         pitch=1.0;
         player_sample_position=target_seconds*samplerate*CHANNELS;
+        cout << "Skipped " << difference_seconds << "seconds." << endl;
     } else { //Sync us back on track.
         //if(fabs(difference_seconds) > sync_threshold) {
             if(difference_seconds<0) {
