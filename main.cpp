@@ -6,7 +6,7 @@ namespace po = boost::program_options;
 #include <array>
 #include <cstdint>
 #include <math.h> //fabs
-#include <memory.h> //evil memset.
+#include <memory.h>
 
 #include <jack/jack.h>
 #include <pstreams/pstream.h>
@@ -15,13 +15,20 @@ namespace po = boost::program_options;
 #include <unistd.h>
 
 #define CHANNELS 2
+
+//Dumb hack that is neccessary
+//until we can successfully disconnect from jack.
+//It is used to fill the ring-buffer with silence
+//so that there is no sound until jack kicks our "dead" client (timeout).
 #define EXIT_SECONDS_AFTER_SONG 5
+// TODO This should exit instantly... (it runs EXIT_SECONDS_AFTER_SONG)
+// 06-12 14:39 root         DEBUG    cmwax: Read 0 samples; song duration 0 seconds.
+
 
 using namespace std;
 
 typedef int16_t sample;
 
-//Static stuff, that could be avoided with OOP. (fixme)
 jack_port_t *output_port_1;
 jack_port_t *output_port_2;
 jack_client_t *client;
@@ -37,7 +44,7 @@ bool autoconnect;
 
 /*
  * If it is not explicitely declared otherwise, sample always refers to the total sample for both channels;
- * a STEREO track of 1 second with 44100 samplerate has 88200 samples.
+ * a STEREO track of 1 second with 44100 Hz samplerate has 88200 samples.
  */
 long player_sample_position=0;
 struct timeval tval_start;
@@ -58,7 +65,7 @@ std::deque<sample> read_samples_into_memory(std::basic_istream<char>& in)
     using std::begin;
     using std::end;
 
-    auto const chunk_size = 512*512;
+    auto const chunk_size = 512*64; //TODO Need to experiment with this value (was:512 square)
 
     std::deque<sample> container = std::deque<sample>();
 
@@ -127,8 +134,7 @@ void retarget(bool log) {
 /**
  * TODO This needs documentation;
  */
-int
-process (jack_nframes_t nframes, void *arg)
+int process (jack_nframes_t nframes, void *arg)
 {
     bool log= (log_count == 0);
     log_count= (log_count+1)%10;
@@ -155,10 +161,16 @@ process (jack_nframes_t nframes, void *arg)
         memset(out2, '\0', sizeof(*out2)*nframes);
 
         if(target_seconds > song_duration_seconds + EXIT_SECONDS_AFTER_SONG) {
-            cout << "Ich habe fertig. (Was erlauben Strunz?)" << endl;
-            //jack_client_close (client);
-            //TODO It does not work: The program does not close.
+            cout << "Playback finished. (Was erlaube Strunz?)" << endl;
+
+            //TODO jack_client_close (client);
+            //It does not work: The program does not close.
             //Maybe we can not call jack_client_close from within process?
+
+            //Anyway; since we can assume that jack buffer size is sammler than EXIT_SECONDS_AFTER_SONG
+            //the whole buffer should be filled with silence (zeros) and jack will disconnect our
+            //‎orphaned process after a while without any disturbing noise.
+
             exit (0);
         }
         //Forward pointer manually
@@ -169,7 +181,7 @@ process (jack_nframes_t nframes, void *arg)
         //Short is from -32768 to 32767, so we got to divide by 32768 (which is 2^15)
         float magic=32768.0;
         while(player_sample_position < last_sample_needed) {
-            if(player_sample_position < 0) {
+            if(player_sample_position < 0) { //silence just before the song starts
                 *out1=0;
                 *out2=0;
             } else {
@@ -203,12 +215,18 @@ int main(const int argc, const char* argv[])
         po::options_description desc("Allowed options");
         desc.add_options()
                 ("help,h", "produce help message and exit")
-                ("starttime,t", po::value(&starttime)->default_value(-1), "unix timestamp for track synchronisation; playback starts immediately if ommited.")
-                ("song,s", po::value(&songpath)->required(), "path to the song to play")
-                ("jackport,j", po::value(&jack_portname), "jack port name")
-                ("autoconnect,a", po::bool_switch(&autoconnect)->default_value(true), "cmplayer will automatically connect to speakers")
-                ("importer,i", po::value(&importscript)->default_value("./import"), "helperscript to read audio from; relative to working dir (start with ./) or full path.")
-                ("skipthreshold", po::value(&skip_threshold)->default_value(0.05), "Tolerance in seconds until audio is skipped to sync");
+                ("starttime,t", po::value(&starttime)->default_value(-1),
+                    "unix timestamp for track synchronisation; will be set to call time if not sepcified.")
+                ("song,s", po::value(&songpath)->required(),
+                    "path to the song to play")
+                ("jackport,j", po::value(&jack_portname),
+                    "jack port name")
+                ("autoconnect,a", po::bool_switch(&autoconnect)->default_value(true),
+                    "cmplayer will automatically connect to speakers")
+                ("importer,i", po::value(&importscript)->default_value("./import"),
+                    "helperscript to read audio from; relative to working dir (start with ./) or full path.")
+                ("skipthreshold", po::value(&skip_threshold)->default_value(0.05),
+                    "Tolerance in seconds until audio is skipped to sync");
 
 
         po::variables_map vm;
@@ -291,12 +309,21 @@ int main(const int argc, const char* argv[])
 
     redi::ipstream importer(importscript, importerargs); //TODO Error handling!
 
-
+    //TODO Could this be forked to enable playback as soon as enough chunks have been read?
+    //(Need dq to be thread-safe)
     dq = read_samples_into_memory(importer);
 
-    song_duration_seconds=dq.size()/samplerate/CHANNELS; //c
+    song_duration_seconds=dq.size()/samplerate/CHANNELS;
+    if(dq.size() == 0) {
+        cerr << "No samples read." <<endl <<
+        "Please check path of import script and audio file (provide absolute or relative to working dir!)." <<endl;
+        exit(1);
+
+    }
+
 
     cout << "Read " << dq.size() << " samples; song duration " << song_duration_seconds << " seconds."<< endl;
+
 
     /* create two ports */
 
@@ -351,7 +378,9 @@ int main(const int argc, const char* argv[])
     }
 
     /* keep running; programm exits in retarget() (called by process()) as soon as the song is over. */
-
+    /* TODO: Catch SIGTERM and disconnect before exiting
+     * http://stackoverflow.com/questions/1641182/how-can-i-catch-a-ctrl-c-event-c
+     */
     sleep (-1);
     return 0;
 }

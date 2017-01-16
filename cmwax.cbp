@@ -36,10 +36,9 @@
 			<Add option="-fexceptions" />
 		</Compiler>
 		<Linker>
-			<Add option="-lpthread -ljack" />
+			<Add option="-lpthread -ljack -lboost_program_options" />
 		</Linker>
 		<Unit filename="main.cpp" />
-		<Unit filename="xwax.cpp" />
 		<Extensions>
 			<code_completion />
 			<debugger />
